@@ -1,4 +1,4 @@
-const SERVER_URL = "http://[::1]:1234/global_config/msgfplus";
+const SERVER_URL = "http://[::1]:1234/";
 
 $("#test").click(function () {
     queryApi()
