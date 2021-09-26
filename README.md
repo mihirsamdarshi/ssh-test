@@ -9,7 +9,7 @@ Demonstrates an issue I am having with code for creating a local port forward in
 #### SSH Tunnel
 Requires Rust
 
-Set the `consts` at the top of the `main.rs` file to your own values, then run the app. 
+Set the `const`s at the top of the `main.rs` file to your own values, then run the app. 
 I have set a timeout for the app to exit after 0 minutes but that could be easily changed
 ```bash
 $ cd ssh_tunnel
