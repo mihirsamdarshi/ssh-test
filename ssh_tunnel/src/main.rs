@@ -5,8 +5,10 @@ cargo run
 use std::io::{BufRead, BufReader, Error, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::{str, thread, time};
 
 use async_io::Async;
@@ -44,10 +46,12 @@ async fn handle_req(session: &AsyncSession<TcpStream>, mut stream: TcpStream) {
     // Wrap the stream in a BufReader, so we can use the BufRead methods
     let mut reader = BufReader::new(&mut stream);
     // Read current current data in the TcpStream
-    let request: Vec<u8> = reader.fill_buf().unwrap().to_vec();
+    let mut request = reader.fill_buf().unwrap();
+    let req_bytes = request.len();
+
     println!(
         "REQUEST ({} BYTES):\n{}",
-        request.len(),
+        req_bytes,
         str::from_utf8(&request).unwrap()
     );
     // send the incoming request over ssh on to the remote localhost and port
@@ -63,16 +67,21 @@ async fn handle_req(session: &AsyncSession<TcpStream>, mut stream: TcpStream) {
         .await
         .unwrap();
 
-    channel.write(&request).await.unwrap();
+    channel.write_all(&request[..req_bytes]).await.unwrap();
+    request.consume(req_bytes);
+    channel.flush().await.unwrap();
 
     println!("Request sent");
     // read the remote server's response (all of it, for simplicity's sake)
     // and forward it to the local TCP connection's stream
     let mut response = Vec::new();
+    println!("Reading response");
     let read_bytes = channel.read_to_end(&mut response).await.unwrap();
-    println!("Request read");
+    channel.flush().await.unwrap();
+    println!("Response read");
 
     stream.write_all(&response).unwrap();
+    stream.flush().unwrap();
     println!("SENT {} BYTES AS RESPONSE\n", read_bytes);
 }
 
