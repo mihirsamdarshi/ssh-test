@@ -7,7 +7,7 @@ Demonstrates code for creating a local port forward in Rust, replicating the com
 ### Quickstart
 
 #### SSH Tunnel
-Requires Rust
+Requires [Rust](https://rustup.rs)
 
 Set the `const`s at the top of the `main.rs` file to your own values, then run the app. 
 I have set a timeout for the app to exit after 0 minutes but that could be easily changed
@@ -17,7 +17,7 @@ $ cargo run
 ```
 
 #### Server
-Requires NodeJS and `yarn` (`npm install -g yarn`)
+Requires [NodeJS](https://nodejs.dev) and `yarn` (`npm install -g yarn`)
 
 Install dependencies and run web app
 ```bash
