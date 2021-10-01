@@ -5,18 +5,22 @@ cargo run
 use std::{str, thread, time};
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc::channel,
 };
+use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use async_io::Async;
 use async_ssh2_lite::AsyncSession;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use futures::executor::block_on;
 
-const LOCAL_ADDRESS: &str = "localhost:1234";
+const BUFFER_SIZE: usize = 8192;
 const REMOTE_USERNAME: &str = "";
 // include port, something like "123.123.123.123:22"
 const REMOTE_ADDRESS: &str = "";
@@ -32,47 +36,50 @@ struct SSHKeyPair<'a> {
     private_key: Option<&'a Path>,
 }
 
-fn socket_address_from_str_slice(str_address: &str) -> SocketAddr {
-    str_address
-        .to_string()
+fn make_socket_address<A: ToSocketAddrs>(address: A) -> SocketAddr {
+    address
         .to_socket_addrs()
         .unwrap()
         .next()
         .unwrap()
 }
 
+fn read_buf_bytes(full_req_len: &mut usize, full_req_buf: &mut Vec<u8>, reader_buf_len: usize, mut reader_buf: Vec<u8>) -> bool {
+    // Added these lines for verification of reading requests correctly
+    if reader_buf_len == 0 {
+        // Added these lines for verification of reading requests correctly
+        println!("No bytes read from response");
+        false
+    } else {
+        *full_req_len += reader_buf_len;
+        // we need not read more data in case we have read less data than buffer size
+        if reader_buf_len < BUFFER_SIZE {
+            // let us only append the data how much we have read rather than complete existing buffer data
+            // as n is less than buffer size
+            full_req_buf.append(&mut reader_buf[..reader_buf_len].to_vec()); // convert slice into vec
+            false
+        } else {
+            // append complete buffer vec data into request_buffer vec as n == buffer_size
+            full_req_buf.append(&mut reader_buf);
+            true
+        }
+    }
+}
+
 /// Read the stream data and return stream data & its length.
 fn read_stream<R: Read>(mut stream: R) -> (Vec<u8>, usize) {
-    let buffer_size = 512;
     let mut request_buffer = vec![];
     // let us loop & try to read the whole request data
     let mut request_len = 0usize;
     loop {
-        let mut buffer = vec![0; buffer_size];
+        let mut buffer = vec![0; BUFFER_SIZE];
         // println!("Reading stream data");
         match stream.read(&mut buffer) {
             Ok(n) => {
-                // Added these lines for verification of reading requests correctly
-                if n == 0 {
-                    // Added these lines for verification of reading requests correctly
-                    break;
-                } else {
-                    request_len += n;
-
-                    // we need not read more data in case we have read less data than buffer size
-                    if n < buffer_size {
-                        // let us only append the data how much we have read rather than complete existing buffer data
-                        // as n is less than buffer size
-                        request_buffer.append(&mut buffer[..n].to_vec()); // convert slice into vec
-                        break;
-                    } else {
-                        // append complete buffer vec data into request_buffer vec as n == buffer_size
-                        request_buffer.append(&mut buffer);
-                    }
-                }
+                if !read_buf_bytes(&mut request_len, &mut request_buffer, n, buffer) { break; }
             }
             Err(e) => {
-                println!("Error in reading stream data: {:?}", e);
+                println!("Error in reading request data: {:?}", e);
                 break;
             }
         }
@@ -83,42 +90,27 @@ fn read_stream<R: Read>(mut stream: R) -> (Vec<u8>, usize) {
 
 /// Read the stream data and return stream data & its length.
 async fn read_async_channel<R: AsyncReadExt + std::marker::Unpin>(stream: &mut R) -> (Vec<u8>, usize) {
-    let buffer_size = 512;
-    let mut request_buffer = vec![];
+    let mut response_buffer = vec![];
     // let us loop & try to read the whole request data
-    let mut request_len = 0usize;
+    let mut response_len = 0usize;
     loop {
-        let mut buffer = vec![0; buffer_size];
+        let mut buffer = vec![0; BUFFER_SIZE];
         // println!("Reading stream data");
-        match stream.read(&mut buffer).await {
-            Ok(n) => {
-                // Added these lines for verification of reading requests correctly
-                if n == 0 {
-                    // Added these lines for verification of reading requests correctly
-                    break;
-                } else {
-                    request_len += n;
+        let future_stream = stream.read(&mut buffer);
+        thread::sleep(Duration::from_millis(10));
 
-                    // we need not read more data in case we have read less data than buffer size
-                    if n < buffer_size {
-                        // let us only append the data how much we have read rather than complete existing buffer data
-                        // as n is less than buffer size
-                        request_buffer.append(&mut buffer[..n].to_vec()); // convert slice into vec
-                        break;
-                    } else {
-                        // append complete buffer vec data into request_buffer vec as n == buffer_size
-                        request_buffer.append(&mut buffer);
-                    }
-                }
+        match future_stream.await {
+            Ok(n) => {
+                if !read_buf_bytes(&mut response_len, &mut response_buffer, n, buffer) { break; }
             }
             Err(e) => {
-                println!("Error in reading stream data: {:?}", e);
+                println!("Error in reading response data: {:?}", e);
                 break;
             }
         }
     }
 
-    (request_buffer, request_len)
+    (response_buffer, response_len)
 }
 
 async fn handle_req(session: &AsyncSession<TcpStream>, mut stream: TcpStream) {
@@ -165,30 +157,54 @@ async fn create_ssh_session(
         Err(session
             .last_error()
             .map(Error::from)
-            .unwrap_or_else(|| Error::new(ErrorKind::Other, "unknown userauth error")))
+            .unwrap_or_else(|| Error::new(ErrorKind::Other, "unknown user auth error")))
     } else {
         Ok(session)
     }
 }
 
+fn get_listener_in_port_range(port_range: Range<u16>) -> Result<TcpListener, String> {
+    for port in port_range.clone() {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return Ok(listener);
+        } else {
+            continue;
+        };
+    }
+    Err(format!(
+        "No ports in range {} - {} available",
+        &port_range.start, &port_range.end
+    ))
+}
+
+
 async fn local_port_forward(
     ssh_session: AsyncSession<TcpStream>,
-    local_address: SocketAddr,
+    sender: Sender<Result<String, String>>,
     should_exit: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(local_address).unwrap();
-
-    for stream in listener.incoming() {
-        if should_exit.load(Ordering::SeqCst) {
-            break;
-        }
-
-        match stream {
-            Ok(stream) => {
-                handle_req(&ssh_session, stream).await;
+    match get_listener_in_port_range(1000..2000) {
+        Ok(listener) => {
+            if let Ok(address) = listener.local_addr() {
+                sender.send(Ok(address.to_string())).unwrap();
+            } else {
+                sender.send(Err("Could not retrieve address".to_string())).unwrap();
             }
-            Err(e) => panic!("encountered error: {}", e),
+
+            for stream in listener.incoming() {
+                if should_exit.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                match stream {
+                    Ok(stream) => {
+                        handle_req(&ssh_session, stream).await;
+                    }
+                    Err(e) => panic!("encountered error: {}", e),
+                }
+            }
         }
+        Err(e) => sender.send(Err(e)).unwrap()
     }
 
     println!("TCP Listener stopped");
@@ -198,8 +214,7 @@ async fn local_port_forward(
 
 async fn run() -> std::io::Result<()> {
     let username = REMOTE_USERNAME;
-    let local_address = socket_address_from_str_slice(LOCAL_ADDRESS);
-    let remote_address = socket_address_from_str_slice(REMOTE_ADDRESS);
+    let remote_address = make_socket_address(REMOTE_ADDRESS);
 
     let key_pair = SSHKeyPair {
         public_key: Option::from(Path::new(PUBLIC_KEY_FULL_PATH)),
@@ -214,20 +229,34 @@ async fn run() -> std::io::Result<()> {
     let should_exit = Arc::new(AtomicBool::new(false));
     let listener_should_exit = Arc::clone(&should_exit);
 
+    let (tx, rx) = channel::<Result<String, String>>();
+
     let handler = thread::spawn(move || {
         block_on(local_port_forward(
             session,
-            local_address,
+            tx,
             listener_should_exit,
         ))
     });
+
+    let address = match rx.recv().unwrap() {
+        Ok(msg) => {
+            println!("{}", msg);
+            msg
+        }
+        Err(e) => {
+            should_exit.store(true, Ordering::SeqCst);
+            handler.join().unwrap();
+            panic!("{}", e)
+        }
+    };
 
     println!("sleeping from main thread");
     thread::sleep(time::Duration::from_secs(6000));
     println!("sleep ended, sending abort message");
 
     should_exit.store(true, Ordering::SeqCst);
-    let _ = TcpStream::connect(local_address)?;
+    let _ = TcpStream::connect(make_socket_address(address))?;
 
     handler.join().unwrap()
 }
