@@ -1,24 +1,21 @@
-/*
-cargo run
-*/
-
-use std::{str, thread, time};
-use std::io::{Error, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::ops::Range;
-use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::channel,
+use std::{
+    io::{Error, ErrorKind, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    ops::Range,
+    path::Path,
+    str,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{channel, Sender},
+        Arc,
+    },
+    thread, time,
+    time::Duration,
 };
-use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use async_io::Async;
 use async_ssh2_lite::AsyncSession;
-use futures::{AsyncReadExt, AsyncWriteExt};
-use futures::executor::block_on;
+use futures::{executor::block_on, AsyncReadExt, AsyncWriteExt};
 
 const BUFFER_SIZE: usize = 8192;
 const REMOTE_USERNAME: &str = "";
@@ -37,14 +34,15 @@ struct SSHKeyPair<'a> {
 }
 
 fn make_socket_address<A: ToSocketAddrs>(address: A) -> SocketAddr {
-    address
-        .to_socket_addrs()
-        .unwrap()
-        .next()
-        .unwrap()
+    address.to_socket_addrs().unwrap().next().unwrap()
 }
 
-fn read_buf_bytes(full_req_len: &mut usize, full_req_buf: &mut Vec<u8>, reader_buf_len: usize, mut reader_buf: Vec<u8>) -> bool {
+fn read_buf_bytes(
+    full_req_len: &mut usize,
+    full_req_buf: &mut Vec<u8>,
+    reader_buf_len: usize,
+    mut reader_buf: Vec<u8>,
+) -> bool {
     // Added these lines for verification of reading requests correctly
     if reader_buf_len == 0 {
         // Added these lines for verification of reading requests correctly
@@ -76,7 +74,9 @@ fn read_stream<R: Read>(mut stream: R) -> (Vec<u8>, usize) {
         // println!("Reading stream data");
         match stream.read(&mut buffer) {
             Ok(n) => {
-                if !read_buf_bytes(&mut request_len, &mut request_buffer, n, buffer) { break; }
+                if !read_buf_bytes(&mut request_len, &mut request_buffer, n, buffer) {
+                    break;
+                }
             }
             Err(e) => {
                 println!("Error in reading request data: {:?}", e);
@@ -89,7 +89,9 @@ fn read_stream<R: Read>(mut stream: R) -> (Vec<u8>, usize) {
 }
 
 /// Read the stream data and return stream data & its length.
-async fn read_async_channel<R: AsyncReadExt + std::marker::Unpin>(stream: &mut R) -> (Vec<u8>, usize) {
+async fn read_async_channel<R: AsyncReadExt + std::marker::Unpin>(
+    stream: &mut R,
+) -> (Vec<u8>, usize) {
     let mut response_buffer = vec![];
     // let us loop & try to read the whole request data
     let mut response_len = 0usize;
@@ -101,7 +103,9 @@ async fn read_async_channel<R: AsyncReadExt + std::marker::Unpin>(stream: &mut R
 
         match future_stream.await {
             Ok(n) => {
-                if !read_buf_bytes(&mut response_len, &mut response_buffer, n, buffer) { break; }
+                if !read_buf_bytes(&mut response_len, &mut response_buffer, n, buffer) {
+                    break;
+                }
             }
             Err(e) => {
                 println!("Error in reading response data: {:?}", e);
@@ -122,16 +126,19 @@ async fn handle_req(session: &AsyncSession<TcpStream>, mut stream: TcpStream) {
 
     let (request, req_bytes) = read_stream(&mut stream);
 
-    println!("REQUEST ({} BYTES): ", req_bytes);
+    println!(
+        "REQUEST ({} BYTES): {}",
+        req_bytes,
+        String::from_utf8_lossy(&request[..])
+    );
     // send the incoming request over ssh on to the remote localhost and port
     // where an HTTP server is listening
     channel.write_all(&request[..req_bytes]).await.unwrap();
     channel.flush().await.unwrap();
 
     let (response, res_bytes) = read_async_channel(&mut channel).await;
-    channel.flush().await.unwrap();
 
-    stream.write_all(&response).unwrap();
+    stream.write_all(&response[..res_bytes]).unwrap();
     stream.flush().unwrap();
     println!("SENT {} BYTES AS RESPONSE\n", res_bytes);
 }
@@ -177,7 +184,6 @@ fn get_listener_in_port_range(port_range: Range<u16>) -> Result<TcpListener, Str
     ))
 }
 
-
 async fn local_port_forward(
     ssh_session: AsyncSession<TcpStream>,
     sender: Sender<Result<String, String>>,
@@ -188,7 +194,9 @@ async fn local_port_forward(
             if let Ok(address) = listener.local_addr() {
                 sender.send(Ok(address.to_string())).unwrap();
             } else {
-                sender.send(Err("Could not retrieve address".to_string())).unwrap();
+                sender
+                    .send(Err("Could not retrieve address".to_string()))
+                    .unwrap();
             }
 
             for stream in listener.incoming() {
@@ -231,13 +239,8 @@ async fn run() -> std::io::Result<()> {
 
     let (tx, rx) = channel::<Result<String, String>>();
 
-    let handler = thread::spawn(move || {
-        block_on(local_port_forward(
-            session,
-            tx,
-            listener_should_exit,
-        ))
-    });
+    let handler =
+        thread::spawn(move || block_on(local_port_forward(session, tx, listener_should_exit)));
 
     let address = match rx.recv().unwrap() {
         Ok(msg) => {

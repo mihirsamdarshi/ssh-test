@@ -2,7 +2,7 @@
 
 ## Description
 
-Demonstrates an issue I am having with code for creating a local port forward in Rust, replicating the command line `ssh -L` feature
+Demonstrates code for creating a local port forward in Rust, replicating the command line `ssh -L` feature
 
 ### Quickstart
 
