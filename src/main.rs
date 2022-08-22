@@ -1,6 +1,8 @@
-use std::{fmt::Debug, fs::OpenOptions, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{fmt::Debug, fs::OpenOptions, io::ErrorKind, net::SocketAddr, str::FromStr, sync::Arc};
 
 use anyhow::Result;
+use clap::Parser;
+use lazy_static::lazy_static;
 use russh::{
     client::{self, Channel},
     ChannelMsg, Disconnect,
@@ -100,7 +102,11 @@ async fn read_stream<R: AsyncReadExt + Debug + Unpin>(mut stream: R) -> (Vec<u8>
 impl Session {
     #[instrument]
     async fn connect(user: impl Into<String> + Debug, addr: SocketAddr) -> Result<Self> {
-        let key_pair = load_secret_key("/Users/msamdars/.ssh/id_ed25519", None)?;
+        let home_dir = &*HOME_DIR;
+        let key_pair = load_secret_key(
+            format!("{}/.ssh/id_ed25519", home_dir.trim_end_matches('/')),
+            None,
+        )?;
         let config = Arc::new(client::Config::default());
         let sh = Client {};
         let mut session = client::connect(config, addr, sh).await?;
@@ -172,24 +178,30 @@ async fn handle_req(mut channel: Channel, mut stream: TcpStream, unique_id: Stri
 }
 
 #[instrument]
-async fn listen_on_forwarded_port(sess: Arc<Mutex<Session>>) -> Result<()> {
+async fn listen_on_forwarded_port(
+    sess: Arc<Mutex<Session>>,
+    local_port: u32,
+    remote_port: u32,
+) -> Result<()> {
     debug!("listening on forwarded port");
-    let user_facing_socket = TcpListener::bind("127.0.0.1:1234")
+    let user_facing_socket = TcpListener::bind(format!("127.0.0.1:{}", local_port))
         .in_current_span()
         .await
         .unwrap();
+
     loop {
         let unique_id = Uuid::new_v4().to_string();
         let span = debug_span!("handle_req", unique_id = unique_id);
         let _enter = span.enter();
         let (stream, a) = user_facing_socket.accept().await.unwrap();
+
         let channel = {
             let mut session_guard = sess.lock().await;
             session_guard
                 .session
                 .channel_open_direct_tcpip(
                     "localhost",
-                    PORT_TO_CONNECT,
+                    remote_port,
                     &a.ip().to_string(),
                     a.port().into(),
                 )
@@ -203,21 +215,88 @@ async fn listen_on_forwarded_port(sess: Arc<Mutex<Session>>) -> Result<()> {
 
 struct Wrapper(Arc<Mutex<Session>>);
 
-#[allow(dead_code)]
-const IP_ADDR_OP_TEST_DEBUG: &str = "***REMOVED***";
-#[allow(dead_code)]
-const PORT_OP_TEST_DEBUG: u32 = 8000;
-#[allow(dead_code)]
-const IP_ADDR_MSAMDARS: &str = "***REMOVED***";
-#[allow(dead_code)]
-const PORT_MSAMDARS: u32 = 5000;
+lazy_static! {
+    static ref IP_ADDR_OP_TEST_DEBUG: String = std::env::var("IP_ADDR_OP_TEST_DEBUG").unwrap();
+    static ref IP_ADDR_MSAMDARS: String = std::env::var("IP_ADDR_MSAMDARS").unwrap();
+    static ref HOME_DIR: String = std::env::var("HOME").unwrap();
+}
 
-const IP_ADDR_TO_USE: &str = IP_ADDR_MSAMDARS;
-const PORT_TO_CONNECT: u32 = PORT_OP_TEST_DEBUG;
+#[derive(Parser, Default, Debug)]
+enum Ports {
+    #[default]
+    Web,
+    Server,
+}
+
+impl FromStr for Ports {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "s" => Ok(Self::Server),
+            "w" => Ok(Self::Web),
+            "server" => Ok(Self::Server),
+            "web" => Ok(Self::Web),
+            "Server" => Ok(Self::Server),
+            "Web" => Ok(Self::Web),
+            "8000" => Ok(Self::Web),
+            "5000" => Ok(Self::Server),
+            _ => Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Not a recognized argument",
+            )),
+        }
+    }
+}
+
+#[derive(Parser, Default, Debug)]
+enum IpAddresses {
+    OpTestDbg,
+    #[default]
+    Msamdars,
+}
+
+impl FromStr for IpAddresses {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "optestdbg" => Ok(Self::OpTestDbg),
+            "msamdars" => Ok(Self::Msamdars),
+            "Msamdars" => Ok(Self::Msamdars),
+            "OpTestDbg" => Ok(Self::OpTestDbg),
+            "o" => Ok(Self::OpTestDbg),
+            "m" => Ok(Self::Msamdars),
+            _ => Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Not a recognized argument",
+            )),
+        }
+    }
+}
+
+#[derive(Parser, Default, Debug)]
+struct Arguments {
+    ip: IpAddresses,
+    remote_port: Ports,
+    local_port: u32,
+}
 
 #[instrument]
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Arguments::parse();
+
+    let addr = match args.ip {
+        IpAddresses::Msamdars => &*IP_ADDR_MSAMDARS,
+        IpAddresses::OpTestDbg => &*IP_ADDR_OP_TEST_DEBUG,
+    };
+
+    let remote_port: u32 = match args.remote_port {
+        Ports::Web => 8000,
+        Ports::Server => 5000,
+    };
+
     let fmt_layer = fmt::layer()
         .pretty()
         .with_target(true)
@@ -257,14 +336,18 @@ async fn main() -> Result<()> {
 
     let ssh = Session::connect(
         "msamdars",
-        SocketAddr::from_str(&format!("{}:22", IP_ADDR_TO_USE)).unwrap(),
+        SocketAddr::from_str(&format!("{}:22", addr)).unwrap(),
     )
     .await?;
 
     let e = Arc::new(Mutex::new(ssh));
     let cloned_e = Arc::clone(&e);
 
-    let t1 = tokio::spawn(listen_on_forwarded_port(cloned_e));
+    let t1 = tokio::spawn(listen_on_forwarded_port(
+        cloned_e,
+        args.local_port,
+        remote_port,
+    ));
     let w = Wrapper(e);
 
     let t2 = tokio::spawn(async move {
