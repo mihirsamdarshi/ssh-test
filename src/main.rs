@@ -1,12 +1,16 @@
-use std::{fmt::Debug, fs::OpenOptions, io::ErrorKind, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    fmt::Debug,
+    fs::OpenOptions,
+    io::ErrorKind,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    str::FromStr,
+    sync::Arc,
+};
 
 use anyhow::Result;
 use clap::Parser;
 use lazy_static::lazy_static;
-use russh::{
-    client::{self, Channel},
-    ChannelMsg, Disconnect,
-};
+use russh::{client, client::Msg, Channel, ChannelMsg, Disconnect};
 use russh_keys::{key::PublicKey, load_secret_key};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -127,8 +131,9 @@ impl Session {
     }
 }
 
+#[allow(unused_variables)]
 #[instrument(skip(channel))]
-async fn handle_req(mut channel: Channel, mut stream: TcpStream, unique_id: String) {
+async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id: String) {
     debug!("Splitting stream");
     let (mut read_half, mut write_half) = stream.split();
     debug!("Reading stream");
@@ -142,10 +147,6 @@ async fn handle_req(mut channel: Channel, mut stream: TcpStream, unique_id: Stri
     {
         error!("Error in forwarding request to server: {:?}", e);
     };
-    debug!("Sending EOF to server");
-    if let Err(e) = channel.eof().in_current_span().await {
-        error!("Error in sending EOF to server: {:?}", e);
-    }
 
     debug!("Waiting for response");
     let mut total_len = 0usize;
@@ -216,69 +217,13 @@ async fn listen_on_forwarded_port(
 struct Wrapper(Arc<Mutex<Session>>);
 
 lazy_static! {
-    static ref IP_ADDR_OP_TEST_DEBUG: String = std::env::var("IP_ADDR_OP_TEST_DEBUG").unwrap();
-    static ref IP_ADDR_MSAMDARS: String = std::env::var("IP_ADDR_MSAMDARS").unwrap();
     static ref HOME_DIR: String = std::env::var("HOME").unwrap();
 }
 
 #[derive(Parser, Default, Debug)]
-enum Ports {
-    #[default]
-    Web,
-    Server,
-}
-
-impl FromStr for Ports {
-    type Err = std::io::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "s" => Ok(Self::Server),
-            "w" => Ok(Self::Web),
-            "server" => Ok(Self::Server),
-            "web" => Ok(Self::Web),
-            "Server" => Ok(Self::Server),
-            "Web" => Ok(Self::Web),
-            "8000" => Ok(Self::Web),
-            "5000" => Ok(Self::Server),
-            _ => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "Not a recognized argument",
-            )),
-        }
-    }
-}
-
-#[derive(Parser, Default, Debug)]
-enum IpAddresses {
-    OpTestDbg,
-    #[default]
-    Msamdars,
-}
-
-impl FromStr for IpAddresses {
-    type Err = std::io::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "optestdbg" => Ok(Self::OpTestDbg),
-            "msamdars" => Ok(Self::Msamdars),
-            "Msamdars" => Ok(Self::Msamdars),
-            "OpTestDbg" => Ok(Self::OpTestDbg),
-            "o" => Ok(Self::OpTestDbg),
-            "m" => Ok(Self::Msamdars),
-            _ => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "Not a recognized argument",
-            )),
-        }
-    }
-}
-
-#[derive(Parser, Default, Debug)]
 struct Arguments {
-    ip: IpAddresses,
-    remote_port: Ports,
+    ip: IpAddr,
+    remote_port: u32,
     local_port: u32,
 }
 
@@ -286,16 +231,6 @@ struct Arguments {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Arguments::parse();
-
-    let addr = match args.ip {
-        IpAddresses::Msamdars => &*IP_ADDR_MSAMDARS,
-        IpAddresses::OpTestDbg => &*IP_ADDR_OP_TEST_DEBUG,
-    };
-
-    let remote_port: u32 = match args.remote_port {
-        Ports::Web => 8000,
-        Ports::Server => 5000,
-    };
 
     let fmt_layer = fmt::layer()
         .pretty()
@@ -334,11 +269,7 @@ async fn main() -> Result<()> {
         .with(json_layer)
         .init();
 
-    let ssh = Session::connect(
-        "msamdars",
-        SocketAddr::from_str(&format!("{}:22", addr)).unwrap(),
-    )
-    .await?;
+    let ssh = Session::connect("msamdars", SocketAddr::new(addr, 22)).await?;
 
     let e = Arc::new(Mutex::new(ssh));
     let cloned_e = Arc::clone(&e);
@@ -346,7 +277,7 @@ async fn main() -> Result<()> {
     let t1 = tokio::spawn(listen_on_forwarded_port(
         cloned_e,
         args.local_port,
-        remote_port,
+        args.remote_port,
     ));
     let w = Wrapper(e);
 
