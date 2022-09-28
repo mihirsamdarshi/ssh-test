@@ -1,9 +1,7 @@
 use std::{
     fmt::Debug,
     fs::OpenOptions,
-    io::ErrorKind,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
-    str::FromStr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
@@ -195,6 +193,7 @@ async fn listen_on_forwarded_port(
         let span = debug_span!("handle_req", unique_id = unique_id);
         let _enter = span.enter();
         let (stream, a) = user_facing_socket.accept().await.unwrap();
+        debug!("Accepted connection from {:?}", a);
 
         let channel = {
             let mut session_guard = sess.lock().await;
@@ -220,10 +219,21 @@ lazy_static! {
     static ref HOME_DIR: String = std::env::var("HOME").unwrap();
 }
 
-#[derive(Parser, Default, Debug)]
+/// Simple program to forward a local port to a remote port on a remote host.
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
 struct Arguments {
-    ip: IpAddr,
+    /// The username to connect as on the remote host (e.g. root).
+    #[clap(short, long, value_parser)]
+    user: String,
+    /// The IPV4 address of the remote host (e.g. 80.69.420.85).
+    #[clap(short, long, value_parser)]
+    ip: Ipv4Addr,
+    /// The port on the remote host to connect to (e.g. 8000).
+    #[clap(short, long, value_parser)]
     remote_port: u32,
+    /// The local port to listen on (e.g 9876).
+    #[clap(short, long, value_parser)]
     local_port: u32,
 }
 
@@ -269,7 +279,7 @@ async fn main() -> Result<()> {
         .with(json_layer)
         .init();
 
-    let ssh = Session::connect("msamdars", SocketAddr::new(addr, 22)).await?;
+    let ssh = Session::connect(&args.user, SocketAddr::new(IpAddr::V4(args.ip), 22)).await?;
 
     let e = Arc::new(Mutex::new(ssh));
     let cloned_e = Arc::clone(&e);
