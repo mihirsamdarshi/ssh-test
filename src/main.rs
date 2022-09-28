@@ -116,7 +116,12 @@ impl Session {
             .authenticate_publickey(user, Arc::new(key_pair))
             .await
             .unwrap();
-        dbg!(auth_res);
+
+        if !auth_res {
+            eprintln!("Authentication failed");
+            std::process::exit(1);
+        }
+
         Ok(Self { session })
     }
 
@@ -134,10 +139,12 @@ impl Session {
 async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id: String) {
     debug!("Splitting stream");
     let (mut read_half, mut write_half) = stream.split();
+
     debug!("Reading stream");
     let (request_buffer, request_len) = read_stream(&mut read_half).in_current_span().await;
     debug!("Request buffer: {:?}", std::str::from_utf8(&request_buffer));
     debug!("request_len: {}", request_len);
+
     if let Err(e) = channel
         .data(&request_buffer[..request_len])
         .in_current_span()
@@ -145,6 +152,11 @@ async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id:
     {
         error!("Error in forwarding request to server: {:?}", e);
     };
+
+    // debug!("Sending EOF to server");
+    // if let Err(e) = channel.eof().in_current_span().await {
+    //     error!("Error in sending EOF to server: {:?}", e);
+    // }
 
     debug!("Waiting for response");
     let mut total_len = 0usize;
@@ -165,7 +177,10 @@ async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id:
                 };
                 debug!("Response written to client");
             }
-            ChannelMsg::Eof | ChannelMsg::Close => {
+            ChannelMsg::Eof => {
+                debug!("Received EOF from server");
+            }
+            ChannelMsg::Close => {
                 debug!("End of data to be received");
                 break;
             }
