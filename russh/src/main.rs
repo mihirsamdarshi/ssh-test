@@ -136,9 +136,9 @@ impl Session {
 
 #[allow(unused_variables)]
 #[instrument(skip(channel))]
-async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id: String) {
+async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, unique_id: String) {
     debug!("Splitting stream");
-    let (mut read_half, mut write_half) = stream.split();
+    let (mut read_half, mut write_half) = incoming_stream.split();
 
     debug!("Reading stream");
     let (request_buffer, request_len) = read_stream(&mut read_half).in_current_span().await;
@@ -160,6 +160,7 @@ async fn handle_req(mut channel: Channel<Msg>, mut stream: TcpStream, unique_id:
 
     debug!("Waiting for response");
     let mut total_len = 0usize;
+
     while let Some(msg) = channel.wait().in_current_span().await {
         debug!("Received response from server = {:?}", &msg);
         match msg {
@@ -253,7 +254,7 @@ struct Arguments {
 }
 
 #[instrument]
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Arguments::parse();
 
@@ -285,12 +286,12 @@ async fn main() -> Result<()> {
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("debug"))
         .unwrap();
-    let console_layer = console_subscriber::spawn();
+    // let console_layer = console_subscriber::spawn();
 
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)
-        .with(console_layer)
+        // .with(console_layer)
         .with(json_layer)
         .init();
 
