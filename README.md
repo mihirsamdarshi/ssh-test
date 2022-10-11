@@ -1,28 +1,30 @@
-# ssh-test
+# Local Port Forwarding Experiments
 
-Testing out creating local port forwarding using Russh.
+This repository contains experiments that I have tried while trying to get port forwarding working with Rust.
 
-**This is a work in progress, and does not currently work to forward many concurrent TCP streams (like loading a
-webpage)**
+Specifically this repository contains experiments with two crates thus far:
 
-```md
-ssh-test 0.1.0
-Simple program to forward a local port to a remote port on a remote host
+- [russh](https://github.com/warp-tech/russh) - An (updated) fork of Thrussh, which is a pure-Rust implementation of the
+  SSH protocol.
+- [async-ssh2-lite](https://github.com/bk-rs/ssh-rs) - An async wrapper around ssh2-rs, which is a Rust wrapper around
+  libssh2.
 
-USAGE:
-ssh-test --user <USER> --ip <IP> --remote-port <REMOTE_PORT> --local-port <LOCAL_PORT>
+In addition, in order to test the capabilities of both these libraries, this repository contains a demo web application
+that loads some data and sends it to the frontend. That code is located in the webapp directory.
 
-OPTIONS:
--h, --help Print help information
--i, --ip <IP>                      The IPV4 address of the remote host (e.g. 80.69.420.85)
--l, --local-port <LOCAL_PORT>      The local port to listen on (e.g 9876)
--r, --remote-port <REMOTE_PORT>    The port on the remote host to connect to (e.g. 8000)
--u, --user <USER>                  The username to connect as on the remote host (e.g. root)
--V, --version Print version information
-```
+I find that running this is easy, however, for just a frontend, I have also created a Docker image that runs the Gatsby
+Gitbook starter, hosted on Docker Hub
+at [mihirstanford/gatsby-0gitbook-starter](https://hub.docker.com/r/mihirstanford/gatsby-gitbook-starter).
 
-To use, clone and enter this repo, then
-run `cargo run -- --user <USER> --ip <IP> --remote-port <REMOTE_PORT> --local-port <LOCAL_PORT>`
+### NOTE:
+
+None of the binaries work as expected, and struggle to handle a full remote port forwarding session. I have not yet
+debugged the issues in either library, and am working on fixing/upstreaming the fixes that I make to whichever library I
+get working. Therefore, this repository is a work in progress, and I will be updating it as I work further.
+
+In addition, other libraries that I have tried (but that aren't in this library and plan to add are):
+
+- [async-ssh2](https://github.com/spebern/async-ssh2) - Another async wrapper around ssh2-rs
 
 ## Example
 
@@ -32,6 +34,11 @@ following commands:
 
 ```bash
 docker run docker run -d -p 8080:8080 --rm mihirstanford/gatsby-gitbook-starter
+```
+
+Then, you may navigate into either the `async-ssh2-lite` or `russh` directories and run the following:
+
+```bash
 cargo run -- --user <USER> --ip 127.0.0.1 --remote-port 8080 --local-port 42069
 ```
 

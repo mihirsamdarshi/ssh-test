@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "async-ssh2-lite",
+    "russh"
+]
