@@ -71,13 +71,29 @@ dependencies = [
 
 [[package]]
 name = "async-ssh2-lite"
-version = "0.2.2"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89f6414df0399afb863951edded534013e4c74cc4d7ab3b4a92b608986027ec7"
+checksum = "69832303b1bdcfa73a74e30632e227f1f49ecc9d5da23bc1f2e1c268a1e7aad9"
 dependencies = [
- "async-io",
+ "async-trait",
  "futures-util",
  "ssh2",
+ "tokio",
+]
+
+[[package]]
+name = "async-ssh2-lite-port-forward"
+version = "0.2.0"
+dependencies = [
+ "async-io",
+ "async-ssh2-lite",
+ "common-port-forward",
+ "futures",
+ "openssh-keys",
+ "openssl",
+ "pem",
+ "rust-crypto",
+ "tokio",
 ]
 
 [[package]]
@@ -355,6 +371,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2850f2f5a82cbf437dd5af4d49848fbdfc27c157c3d010345776f952765261c5"
 dependencies = [
  "os_str_bytes",
+]
+
+[[package]]
+name = "common-port-forward"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "console-subscriber",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1321,13 +1348,11 @@ dependencies = [
 
 [[package]]
 name = "pem"
-version = "0.8.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd56cbd21fea48d0c440b41cd69c589faacade08c992d9a54e471b79d0fd13eb"
+checksum = "03c64931a1a212348ec4f3b4362585eca7159d0d09cbdf4a7f74f02173596fd4"
 dependencies = [
  "base64",
- "once_cell",
- "regex",
 ]
 
 [[package]]
@@ -1696,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "russh-keys"
-version = "0.22.0-beta.6"
+version = "0.22.0-beta.7"
 dependencies = [
  "aes",
  "bcrypt-pbkdf",
@@ -1735,16 +1760,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
- "console-subscriber",
+ "common-port-forward",
  "futures",
- "lazy_static",
  "russh",
  "russh-keys",
  "tokio",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -1904,19 +1925,6 @@ dependencies = [
  "libc",
  "libssh2-sys",
  "parking_lot 0.11.2",
-]
-
-[[package]]
-name = "ssh_test"
-version = "0.1.0"
-dependencies = [
- "async-io",
- "async-ssh2-lite",
- "futures",
- "openssh-keys",
- "openssl",
- "pem",
- "rust-crypto",
 ]
 
 [[package]]

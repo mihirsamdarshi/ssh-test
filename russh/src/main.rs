@@ -1,13 +1,12 @@
 use std::{
     fmt::Debug,
-    fs::OpenOptions,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
+    path::Path,
     sync::Arc,
 };
 
 use anyhow::Result;
-use clap::Parser;
-use lazy_static::lazy_static;
+use common_port_forward::{get_args, setup_tracing};
 use russh::{client, client::Msg, Channel, ChannelMsg, Disconnect};
 use russh_keys::{key::PublicKey, load_secret_key};
 use tokio::{
@@ -17,7 +16,6 @@ use tokio::{
     sync::Mutex,
 };
 use tracing::{debug, debug_span, error, instrument, Instrument};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use uuid::Uuid;
 
 mod scp;
@@ -103,12 +101,12 @@ async fn read_stream<R: AsyncReadExt + Debug + Unpin>(mut stream: R) -> (Vec<u8>
 
 impl Session {
     #[instrument]
-    async fn connect(user: impl Into<String> + Debug, addr: SocketAddr) -> Result<Self> {
-        let home_dir = &*HOME_DIR;
-        let key_pair = load_secret_key(
-            format!("{}/.ssh/id_ed25519", home_dir.trim_end_matches('/')),
-            None,
-        )?;
+    async fn connect<P: AsRef<Path> + Debug>(
+        user: impl Into<String> + Debug,
+        addr: SocketAddr,
+        private_key_path: P,
+    ) -> Result<Self> {
+        let key_pair = load_secret_key(private_key_path, None)?;
         let config = Arc::new(client::Config::default());
         let sh = Client {};
         let mut session = client::connect(config, addr, sh).await?;
@@ -231,79 +229,26 @@ async fn listen_on_forwarded_port(
 
 struct Wrapper(Arc<Mutex<Session>>);
 
-lazy_static! {
-    static ref HOME_DIR: String = std::env::var("HOME").unwrap();
-}
-
-/// Simple program to forward a local port to a remote port on a remote host.
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct Arguments {
-    /// The username to connect as on the remote host (e.g. root).
-    #[clap(short, long, value_parser)]
-    user: String,
-    /// The IPV4 address of the remote host (e.g. 80.69.420.85).
-    #[clap(short, long, value_parser)]
-    ip: Ipv4Addr,
-    /// The port on the remote host to connect to (e.g. 8000).
-    #[clap(short, long, value_parser)]
-    remote_port: u32,
-    /// The local port to listen on (e.g 9876).
-    #[clap(short, long, value_parser)]
-    local_port: u32,
-}
-
 #[instrument]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let args = Arguments::parse();
+    setup_tracing();
+    let args = get_args();
 
-    let fmt_layer = fmt::layer()
-        .pretty()
-        .with_target(true)
-        .with_level(true) // don't include levels in formatted output
-        .with_thread_ids(true); // include the thread ID of the current thread
-
-    let (non_blocking, _guard) = tracing_appender::non_blocking(
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open("trace.json")
-            .unwrap(),
-    );
-
-    let json_layer = fmt::layer()
-        .json()
-        .with_current_span(true)
-        .with_span_list(true)
-        .with_target(true)
-        .with_level(true) // don't include levels in formatted output
-        .with_thread_ids(true) // include the thread ID of the current thread
-        .with_thread_names(true)
-        .with_writer(non_blocking); // include the name of the current thread
-
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("debug"))
-        .unwrap();
-    // let console_layer = console_subscriber::spawn();
-
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt_layer)
-        // .with(console_layer)
-        .with(json_layer)
-        .init();
-
-    let ssh = Session::connect(&args.user, SocketAddr::new(IpAddr::V4(args.ip), 22)).await?;
+    let ssh = Session::connect(
+        &args.user,
+        SocketAddr::new(IpAddr::V4(args.ip), 22),
+        args.private_key_path,
+    )
+    .await?;
 
     let e = Arc::new(Mutex::new(ssh));
     let cloned_e = Arc::clone(&e);
 
     let t1 = tokio::spawn(listen_on_forwarded_port(
         cloned_e,
-        args.local_port,
-        args.remote_port,
+        args.local_port as u32,
+        args.remote_port as u32,
     ));
     let w = Wrapper(e);
 
