@@ -12,7 +12,7 @@ Requires [Rust](https://rustup.rs)
 Set the `const`s at the top of the `main.rs` file to your own values, then run the app. 
 I have set a timeout for the app to exit after 0 minutes but that could be easily changed
 ```bash
-$ cd ssh_tunnel
+$ cd async-ssh2-lite
 $ cargo run
 ```
 
