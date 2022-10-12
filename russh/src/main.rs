@@ -5,8 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
-use common_port_forward::{get_args, setup_tracing};
+use anyhow::{anyhow, Result};
+use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
 use russh::{client, client::Msg, Channel, ChannelMsg, Disconnect};
 use russh_keys::{key::PublicKey, load_secret_key};
 use tokio::{
@@ -19,6 +19,8 @@ use tracing::{debug, debug_span, error, instrument, Instrument};
 use uuid::Uuid;
 
 mod scp;
+
+const BUFFER_SIZE: usize = 16_384;
 
 struct Client {}
 
@@ -45,33 +47,6 @@ pub struct Session {
 impl Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Session")
-    }
-}
-
-const BUFFER_SIZE: usize = 16_384;
-
-#[instrument(skip(reader_buf))]
-fn read_buf_bytes(
-    full_req_len: &mut usize,
-    full_req_buf: &mut Vec<u8>,
-    reader_buf_len: usize,
-    mut reader_buf: Vec<u8>,
-) -> bool {
-    if reader_buf_len == 0 {
-        false
-    } else {
-        *full_req_len += reader_buf_len;
-        // we need not read more data in case we have read less data than buffer size
-        if reader_buf_len < BUFFER_SIZE {
-            // let us only append the data how much we have read rather than complete
-            // existing buffer data as n is less than buffer size
-            full_req_buf.append(&mut reader_buf[..reader_buf_len].to_vec()); // convert slice into vec
-            false
-        } else {
-            // append complete buffer vec data into request_buffer vec as n == buffer_size
-            full_req_buf.append(&mut reader_buf);
-            true
-        }
     }
 }
 
@@ -238,7 +213,7 @@ async fn main() -> Result<()> {
     let ssh = Session::connect(
         &args.user,
         SocketAddr::new(IpAddr::V4(args.ip), 22),
-        args.private_key_path,
+        expand_home_dir(&args.private_key_path).map_err(|e| anyhow!(e))?,
     )
     .await?;
 

@@ -11,9 +11,9 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Result;
 use async_ssh2_lite::AsyncSession;
-use common_port_forward::{get_args, setup_tracing};
-use futures::executor::block_on;
+use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -28,33 +28,6 @@ struct SSHKeyPair<'a> {
 
 fn make_socket_address<A: ToSocketAddrs>(address: A) -> SocketAddr {
     address.to_socket_addrs().unwrap().next().unwrap()
-}
-
-fn read_buf_bytes(
-    full_req_len: &mut usize,
-    full_req_buf: &mut Vec<u8>,
-    reader_buf_len: usize,
-    mut reader_buf: Vec<u8>,
-) -> bool {
-    // Added these lines for verification of reading requests correctly
-    if reader_buf_len == 0 {
-        // Added these lines for verification of reading requests correctly
-        println!("No bytes read from response");
-        false
-    } else {
-        *full_req_len += reader_buf_len;
-        // we need not read more data in case we have read less data than buffer size
-        if reader_buf_len < BUFFER_SIZE {
-            // let us only append the data how much we have read rather than complete
-            // existing buffer data as n is less than buffer size
-            full_req_buf.append(&mut reader_buf[..reader_buf_len].to_vec()); // convert slice into vec
-            false
-        } else {
-            // append complete buffer vec data into request_buffer vec as n == buffer_size
-            full_req_buf.append(&mut reader_buf);
-            true
-        }
-    }
 }
 
 /// Read the stream data and return stream data & its length.
@@ -184,21 +157,24 @@ async fn local_port_forward(
     Ok(())
 }
 
-async fn run() -> std::io::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
     setup_tracing();
     let args = get_args();
 
     let remote_address = SocketAddr::new(IpAddr::V4(args.ip), 22);
 
-    let private_key = Some(Path::new(&args.private_key_path));
-    let public_key = match &args.public_key_path {
-        Some(path) => Some(Path::new(path)),
-        None => None,
-    };
+    let private_key = Some(expand_home_dir(&args.private_key_path).unwrap());
+    let public_key = args
+        .public_key_path
+        .as_ref()
+        .map(expand_home_dir)
+        .transpose()
+        .unwrap();
 
     let key_pair = SSHKeyPair {
-        public_key,
-        private_key,
+        public_key: public_key.as_ref().map(|p| p.as_ref()),
+        private_key: private_key.as_ref().map(|p| p.as_ref()),
     };
 
     let session = match create_ssh_session(&args.user, remote_address, key_pair).await {
@@ -241,9 +217,5 @@ async fn run() -> std::io::Result<()> {
     should_exit.store(true, Ordering::SeqCst);
     let _ = TcpStream::connect(make_socket_address(local_address)).await?;
 
-    handler.await.unwrap()
-}
-
-fn main() -> std::io::Result<()> {
-    block_on(run())
+    handler.await?
 }
