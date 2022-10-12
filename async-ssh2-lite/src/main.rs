@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     io::{Error, ErrorKind},
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::Path,
@@ -17,10 +18,14 @@ use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_traci
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    select,
 };
+use tracing::{debug, debug_span, instrument, Instrument};
+use uuid::Uuid;
 
 const BUFFER_SIZE: usize = 8192;
 
+#[derive(Debug)]
 struct SSHKeyPair<'a> {
     public_key: Option<&'a Path>,
     private_key: Option<&'a Path>,
@@ -31,7 +36,8 @@ fn make_socket_address<A: ToSocketAddrs>(address: A) -> SocketAddr {
 }
 
 /// Read the stream data and return stream data & its length.
-async fn read_stream<R: AsyncRead + Unpin>(mut stream: R) -> (Vec<u8>, usize) {
+#[instrument]
+async fn read_stream<R: AsyncRead + Unpin + Debug>(mut stream: R) -> (Vec<u8>, usize) {
     let mut request_buffer = vec![];
     // let us loop & try to read the whole request data
     let mut request_len = 0usize;
@@ -55,6 +61,7 @@ async fn read_stream<R: AsyncRead + Unpin>(mut stream: R) -> (Vec<u8>, usize) {
 }
 
 /// Read the stream data and return stream data & its length.
+#[instrument(skip(stream))]
 async fn read_async_channel<R: AsyncReadExt + Unpin>(stream: &mut R) -> (Vec<u8>, usize) {
     let mut response_buffer = vec![];
     // let us loop & try to read the whole request data
@@ -81,7 +88,13 @@ async fn read_async_channel<R: AsyncReadExt + Unpin>(stream: &mut R) -> (Vec<u8>
     (response_buffer, response_len)
 }
 
-async fn handle_req(remote_port: u16, session: &AsyncSession<TcpStream>, mut stream: TcpStream) {
+#[instrument(skip(session))]
+async fn handle_req(
+    remote_port: u16,
+    session: Arc<AsyncSession<TcpStream>>,
+    mut stream: TcpStream,
+    _unique_id: String,
+) {
     let mut channel = session
         .channel_direct_tcpip("localhost", remote_port, None)
         .await
@@ -89,7 +102,7 @@ async fn handle_req(remote_port: u16, session: &AsyncSession<TcpStream>, mut str
 
     let (request, req_bytes) = read_stream(&mut stream).await;
 
-    println!(
+    debug!(
         "REQUEST ({} BYTES): {}",
         req_bytes,
         String::from_utf8_lossy(&request[..])
@@ -98,14 +111,16 @@ async fn handle_req(remote_port: u16, session: &AsyncSession<TcpStream>, mut str
     // where an HTTP server is listening
     channel.write_all(&request[..req_bytes]).await.unwrap();
     channel.flush().await.unwrap();
+    channel.eof();
 
     let (response, res_bytes) = read_async_channel(&mut channel).await;
 
     stream.write_all(&response[..res_bytes]).await.unwrap();
     stream.flush().await.unwrap();
-    println!("SENT {} BYTES AS RESPONSE\n", res_bytes);
+    debug!("SENT {} BYTES AS RESPONSE\n", res_bytes);
 }
 
+#[instrument]
 async fn create_ssh_session(
     username: &str,
     remote_address: SocketAddr,
@@ -133,12 +148,14 @@ async fn create_ssh_session(
     }
 }
 
+#[instrument(skip(ssh_session))]
 async fn local_port_forward(
     local_listener: TcpListener,
     remote_port: u16,
     ssh_session: AsyncSession<TcpStream>,
     should_exit: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let ssh_session = Arc::from(ssh_session);
     loop {
         if should_exit.load(Ordering::SeqCst) {
             break;
@@ -146,7 +163,13 @@ async fn local_port_forward(
 
         match local_listener.accept().await {
             Ok((stream, _a)) => {
-                handle_req(remote_port, &ssh_session, stream).await;
+                let unique_id = Uuid::new_v4().to_string();
+                let span = debug_span!("handle_req", unique_id = unique_id);
+                let _enter = span.enter();
+                let cloned_session = Arc::clone(&ssh_session);
+                tokio::spawn(
+                    handle_req(remote_port, cloned_session, stream, unique_id).in_current_span(),
+                );
             }
             Err(e) => panic!("encountered error: {}", e),
         }
@@ -190,32 +213,40 @@ async fn main() -> std::io::Result<()> {
     let local_listener = match TcpListener::bind(local_address).await {
         Ok(listener) => {
             if let Ok(address) = listener.local_addr() {
-                println!("{}", address);
+                debug!("{}", address);
                 listener
             } else {
-                println!("Could not get local address");
+                debug!("Could not get local address");
                 std::process::exit(1);
             }
         }
         Err(e) => {
-            println!("Error in binding to local port: {}", e);
+            debug!("Error in binding to local port: {}", e);
             std::process::exit(1);
         }
     };
 
-    let handler = tokio::spawn(local_port_forward(
+    let t1 = tokio::spawn(local_port_forward(
         local_listener,
         args.remote_port,
         session,
         listener_should_exit,
     ));
 
-    println!("sleeping from main thread");
-    thread::sleep(Duration::from_secs(6000));
-    println!("sleep ended, sending abort message");
+    let t2 = tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        {
+            should_exit.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(make_socket_address(local_address))
+                .await
+                .unwrap();
+        }
+    });
 
-    should_exit.store(true, Ordering::SeqCst);
-    let _ = TcpStream::connect(make_socket_address(local_address)).await?;
+    select! {
+        _ = t1 => {},
+        _ = t2 => {},
+    }
 
-    handler.await?
+    Ok(())
 }

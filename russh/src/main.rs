@@ -107,9 +107,8 @@ impl Session {
     }
 }
 
-#[allow(unused_variables)]
 #[instrument(skip(channel))]
-async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, unique_id: String) {
+async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, _unique_id: String) {
     debug!("Splitting stream");
     let (mut read_half, mut write_half) = incoming_stream.split();
 

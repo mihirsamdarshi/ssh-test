@@ -95,6 +95,8 @@ dependencies = [
  "pem",
  "rust-crypto",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -379,6 +381,7 @@ dependencies = [
  "clap",
  "console-subscriber",
  "lazy_static",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
