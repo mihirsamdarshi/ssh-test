@@ -12,6 +12,11 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 const BUFFER_SIZE: usize = 16_384;
 
+/// Expand a tilde to the full path of the user's home directory
+///
+/// ## Errors
+/// if the path does not start with a tilde or if the HOME environment variable
+/// is not set
 pub fn expand_home_dir<P: AsRef<Path> + ?Sized>(path: &P) -> Result<Cow<Path>, String> {
     let path = path.as_ref();
 
@@ -55,6 +60,7 @@ pub struct Arguments {
 }
 
 /// Get arguments from the command line.
+#[must_use]
 pub fn get_args() -> Arguments {
     Arguments::parse()
 }
@@ -85,6 +91,9 @@ pub fn read_buf_bytes(
 }
 
 /// Setup tracing for any program that uses this library.
+///
+/// ## Panics
+/// if the file `trace.json` cannot be opened
 pub fn setup_tracing() {
     let fmt_layer = fmt::layer()
         .pretty()

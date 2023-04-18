@@ -6,6 +6,7 @@ Specifically this repository contains experiments with two crates thus far:
 
 - [russh](https://github.com/warp-tech/russh) - An (updated) fork of Thrussh, which is a pure-Rust implementation of the
   SSH protocol.
+- [ssh2-rs](https://github.com/alexcrichton/ssh2-rs) - A Rust wrapper around libssh2.
 - [async-ssh2-lite](https://github.com/bk-rs/ssh-rs) - An async wrapper around ssh2-rs, which is a Rust wrapper around
   libssh2.
 
@@ -22,10 +23,6 @@ None of the binaries work as expected, and struggle to handle a full remote port
 debugged the issues in either library, and am working on fixing/upstreaming the fixes that I make to whichever library I
 get working. Therefore, this repository is a work in progress, and I will be updating it as I work further.
 
-In addition, other libraries that I have tried (but that aren't in this library and plan to add are):
-
-- [async-ssh2](https://github.com/spebern/async-ssh2) - Another async wrapper around ssh2-rs
-
 ## Example
 
 To run a demo web application on your local computer and connect to it via SSH, ensure that you have Docker and are
@@ -33,7 +30,7 @@ running an SSH server on your local machine. Add your own SSH public key to `~/.
 following commands:
 
 ```bash
-docker run docker run -d -p 8080:8080 --rm mihirstanford/gatsby-gitbook-starter
+docker run -d -p 8080:8080 --rm mihirstanford/gatsby-gitbook-starter
 ```
 
 Then, you may navigate into either the `async-ssh2-lite` or `russh` directories and run the following:
@@ -55,7 +52,7 @@ locally
 
 ### To Enable SSH Login (On Mac)
 
-First, go to System Preferences > Sharing and enable Remote Login. You may need to restart your computer.
+First, go to Settings > General > Sharing and enable Remote Login. You may need to restart your computer.
 
 To create an SSH key and add it to your `authorized_keys` file, run the following commands:
 

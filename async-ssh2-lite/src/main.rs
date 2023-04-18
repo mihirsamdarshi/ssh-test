@@ -20,7 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
 };
-use tracing::{debug, debug_span, instrument, Instrument};
+use tracing::{debug, debug_span, error, instrument, Instrument};
 use uuid::Uuid;
 
 const BUFFER_SIZE: usize = 8192;
@@ -51,7 +51,7 @@ async fn read_stream<R: AsyncRead + Unpin + Debug>(mut stream: R) -> (Vec<u8>, u
                 }
             }
             Err(e) => {
-                println!("Error in reading request data: {:?}", e);
+                println!("Error in reading request data: {e:?}");
                 break;
             }
         }
@@ -79,7 +79,7 @@ async fn read_async_channel<R: AsyncReadExt + Unpin>(stream: &mut R) -> (Vec<u8>
                 }
             }
             Err(e) => {
-                println!("Error in reading response data: {:?}", e);
+                error!("Error in reading response data: {e:?}");
                 break;
             }
         }
@@ -93,7 +93,7 @@ async fn handle_req(
     remote_port: u16,
     session: Arc<AsyncSession<TcpStream>>,
     mut stream: TcpStream,
-    _unique_id: String,
+    unique_id: String,
 ) {
     let mut channel = session
         .channel_direct_tcpip("localhost", remote_port, None)
@@ -138,13 +138,13 @@ async fn create_ssh_session(
         )
         .await?;
 
-    if !session.authenticated() {
-        Err(session
-            .last_error()
-            .map(Error::from)
-            .unwrap_or_else(|| Error::new(ErrorKind::Other, "unknown user auth error")))
-    } else {
+    if session.authenticated() {
         Ok(session)
+    } else {
+        Err(session.last_error().map_or_else(
+            || Error::new(ErrorKind::Other, "unknown user auth error"),
+            Error::from,
+        ))
     }
 }
 
@@ -196,8 +196,8 @@ async fn main() -> std::io::Result<()> {
         .unwrap();
 
     let key_pair = SSHKeyPair {
-        public_key: public_key.as_ref().map(|p| p.as_ref()),
-        private_key: private_key.as_ref().map(|p| p.as_ref()),
+        public_key: public_key.as_ref().map(AsRef::as_ref),
+        private_key: private_key.as_ref().map(AsRef::as_ref),
     };
 
     let session = match create_ssh_session(&args.user, remote_address, key_pair).await {

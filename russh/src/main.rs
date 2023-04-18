@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
 use russh::{client, client::Msg, Channel, ChannelMsg, Disconnect};
-use russh_keys::{key::PublicKey, load_secret_key};
+use russh_keys::load_secret_key;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,18 +26,6 @@ struct Client {}
 
 impl client::Handler for Client {
     type Error = russh::Error;
-    type FutureBool = futures::future::Ready<Result<(Self, bool), Self::Error>>;
-    type FutureUnit = futures::future::Ready<Result<(Self, client::Session), Self::Error>>;
-
-    fn finished_bool(self, b: bool) -> Self::FutureBool {
-        futures::future::ready(Ok((self, b)))
-    }
-    fn finished(self, session: client::Session) -> Self::FutureUnit {
-        futures::future::ready(Ok((self, session)))
-    }
-    fn check_server_key(self, _server_public_key: &PublicKey) -> Self::FutureBool {
-        self.finished_bool(true)
-    }
 }
 
 pub struct Session {
@@ -65,7 +53,7 @@ async fn read_stream<R: AsyncReadExt + Debug + Unpin>(mut stream: R) -> (Vec<u8>
                 }
             }
             Err(e) => {
-                eprintln!("Error reading stream: {}", e);
+                eprintln!("Error reading stream: {e}");
                 break;
             }
         }
@@ -108,7 +96,7 @@ impl Session {
 }
 
 #[instrument(skip(channel))]
-async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, _unique_id: String) {
+async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, unique_id: String) {
     debug!("Splitting stream");
     let (mut read_half, mut write_half) = incoming_stream.split();
 
@@ -130,6 +118,8 @@ async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, _
     //     error!("Error in sending EOF to server: {:?}", e);
     // }
 
+    let mut received_response = false;
+
     debug!("Waiting for response");
     let mut total_len = 0usize;
 
@@ -148,10 +138,20 @@ async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, _
                         error!("Error in writing response to client: {:?}", e);
                     }
                 };
+
+                if !received_response {
+                    received_response = true;
+                    debug!("Sending EOF to server");
+                    if let Err(e) = channel.eof().in_current_span().await {
+                        error!("Error in sending EOF to server: {:?}", e);
+                    }
+                }
+
                 debug!("Response written to client");
             }
             ChannelMsg::Eof => {
                 debug!("Received EOF from server");
+                break;
             }
             ChannelMsg::Close => {
                 debug!("End of data to be received");
@@ -171,7 +171,7 @@ async fn listen_on_forwarded_port(
     remote_port: u32,
 ) -> Result<()> {
     debug!("listening on forwarded port");
-    let user_facing_socket = TcpListener::bind(format!("127.0.0.1:{}", local_port))
+    let user_facing_socket = TcpListener::bind(format!("127.0.0.1:{local_port}"))
         .in_current_span()
         .await
         .unwrap();
@@ -184,7 +184,7 @@ async fn listen_on_forwarded_port(
         debug!("Accepted connection from {:?}", a);
 
         let channel = {
-            let mut session_guard = sess.lock().await;
+            let session_guard = sess.lock().await;
             session_guard
                 .session
                 .channel_open_direct_tcpip(
@@ -221,8 +221,8 @@ async fn main() -> Result<()> {
 
     let t1 = tokio::spawn(listen_on_forwarded_port(
         cloned_e,
-        args.local_port as u32,
-        args.remote_port as u32,
+        u32::from(args.local_port),
+        u32::from(args.remote_port),
     ));
     let w = Wrapper(e);
 

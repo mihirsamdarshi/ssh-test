@@ -41,18 +41,13 @@ impl<H: client::Handler> Scp for client::Handle<H> {
         let mut channel = self.channel_open_session().await?;
         eprintln!("channel open: {:?}", channel.id());
         // Actually send the file.
-        channel
-            .exec(false, &(format!("scp -t {}", dirname)))
-            .await?;
+        channel.exec(false, &*(format!("scp -t {dirname}"))).await?;
 
         // SCP needs the contents to be prefixed with the permission, length and base
         // name. https://blogs.oracle.com/janp/entry/how_the_scp_protocol_works
-        let contents = Cursor::new(format!(
-            "C0{:o} {} {}\n",
-            permissions, contents_len, basename
-        ))
-        .chain(contents)
-        .chain(CONFIRM);
+        let contents = Cursor::new(format!("C0{permissions:o} {contents_len} {basename}\n"))
+            .chain(contents)
+            .chain(CONFIRM);
 
         let pinned = Box::pin(contents);
 
@@ -70,7 +65,7 @@ impl<H: client::Handler> Scp for client::Handle<H> {
         let mut channel = self.channel_open_session().await?;
         eprintln!("channel open: {:?}", channel.id());
         // Actually send the file.
-        channel.exec(false, &(format!("scp -f {}", source))).await?;
+        channel.exec(false, &*(format!("scp -f {source}"))).await?;
         // Run the event loop until the channel closes.
 
         loop {
@@ -81,14 +76,11 @@ impl<H: client::Handler> Scp for client::Handle<H> {
                     let mut file = File::create(target).unwrap();
                     file.write_all(&s).unwrap();
                 }
-                Some(ChannelMsg::Eof) => {
-                    break;
-                }
-                Some(ChannelMsg::Close) => {
+                Some(ChannelMsg::Eof | ChannelMsg::Close) => {
                     break;
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
-                    eprintln!("exit status: {}", exit_status);
+                    eprintln!("exit status: {exit_status}");
                     break;
                 }
                 Some(ChannelMsg::ExitSignal {
@@ -98,8 +90,8 @@ impl<H: client::Handler> Scp for client::Handle<H> {
                     ref lang_tag,
                 }) => {
                     eprintln!(
-                        "exit signal: {:?}, core dumped: {}, error: {:?}, lang tag: {:?}",
-                        signal_name, core_dumped, error_message, lang_tag
+                        "exit signal: {signal_name:?}, core dumped: {core_dumped}, error: \
+                         {error_message:?}, lang tag: {lang_tag:?}"
                     );
                     break;
                 }
