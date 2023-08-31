@@ -7,7 +7,7 @@ use std::{
 
 use clap::Parser;
 use lazy_static::lazy_static;
-use tracing::instrument;
+use tracing::{debug, instrument};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 const BUFFER_SIZE: usize = 16_384;
@@ -73,6 +73,8 @@ pub fn read_buf_bytes(
     mut reader_buf: Vec<u8>,
 ) -> bool {
     if reader_buf_len == 0 {
+        // Added these lines for verification of reading requests correctly
+        debug!("No bytes read from response");
         false
     } else {
         *full_req_len += reader_buf_len;

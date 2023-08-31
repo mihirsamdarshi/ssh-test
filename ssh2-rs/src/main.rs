@@ -10,43 +10,12 @@ use std::{
 };
 
 use anyhow::anyhow;
-use common_port_forward::{expand_home_dir, get_args, setup_tracing};
+use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
 use ssh2::Session;
-use tracing::{
-    info, instrument,
-    log::{debug, error},
-};
+use tracing::{debug, error, info, instrument};
 
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 const BUFFER_SIZE: usize = 128;
-
-#[instrument]
-fn read_buf_bytes(
-    full_req_len: &mut usize,
-    full_req_buf: &mut Vec<u8>,
-    reader_buf_len: usize,
-    mut reader_buf: Vec<u8>,
-) -> bool {
-    // Added these lines for verification of reading requests correctly
-    if reader_buf_len == 0 {
-        // Added these lines for verification of reading requests correctly
-        println!("No bytes read from response");
-        false
-    } else {
-        *full_req_len += reader_buf_len;
-        // we need not read more data in case we have read less data than buffer size
-        if reader_buf_len < BUFFER_SIZE {
-            // let us only append the data how much we have read rather than complete
-            // existing buffer data as n is less than buffer size
-            full_req_buf.append(&mut reader_buf[..reader_buf_len].to_vec()); // convert slice into vec
-            false
-        } else {
-            // append complete buffer vec data into request_buffer vec as n == buffer_size
-            full_req_buf.append(&mut reader_buf);
-            true
-        }
-    }
-}
 
 /// Read the stream data and return stream data & its length.
 #[instrument]
@@ -180,9 +149,10 @@ fn main() -> anyhow::Result<()> {
     let exit_signal = Arc::new(AtomicBool::new(false));
     let tx = Arc::clone(&exit_signal);
     ctrlc::set_handler(move || {
+        info!("Received Ctrl-C, exiting");
         tx.store(true, Ordering::SeqCst);
         TcpStream::connect(SocketAddr::new(LOCALHOST, args.local_port)).unwrap();
-        info!("Received Ctrl-C, exiting");
+        std::process::exit(0);
     })
     .expect("Error setting Ctrl-C handler");
 
