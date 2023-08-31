@@ -3,18 +3,17 @@ name = "async-ssh2-lite-port-forward"
 version = "0.2.0"
 edition = "2018"
 license = "MIT"
-license-file = "../LICENSE"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 anyhow = "1.0.58"
 async-io = "^1.6.0"
-async-ssh2-lite = { version = "^0.3.2", features = ["tokio"]}
+async-ssh2-lite = { version = "0.4.7", features = ["tokio"]}
 common-port-forward = { path = "../common" }
 futures = "0.3.21"
-openssh-keys = "^0.5.0"
+openssh-keys = "0.6"
 openssl = { version = "0.10.36", features = ["vendored"] }
-pem = "^1.1.0"
+pem = "3"
 rust-crypto = "^0.2.36"
 tokio = { version = "1.20.1", features = ["full", "tracing"] }
 tracing = "0.1.36"

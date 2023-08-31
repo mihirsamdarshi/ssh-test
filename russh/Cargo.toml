@@ -3,7 +3,6 @@ name = "russh-port-forward"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-license-file = "../LICENSE"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,8 +11,8 @@ anyhow = "1"
 async-trait = "0.1"
 common-port-forward = { path = "../common" }
 futures = "0.3"
-russh = { version = "^0.37.1", features = ["vendored-openssl"] }
-russh-keys = { version = "^0.37.1", features = ["vendored-openssl"] }
+russh = { version = "^0.38.0", features = ["vendored-openssl"] }
+russh-keys = { version = "^0.38.0", features = ["vendored-openssl"] }
 tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "fast-rng"] }

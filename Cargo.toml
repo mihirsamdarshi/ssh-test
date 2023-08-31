@@ -5,3 +5,4 @@ members = [
     "russh",
     "ssh2-rs"
 ]
+resolver = "2"
