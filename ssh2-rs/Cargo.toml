@@ -10,6 +10,9 @@ license = "MIT"
 anyhow = "1"
 common-port-forward = { path = "../common" }
 ctrlc = "3"
+# `poll(2)`, used to block until a socket or the ssh connection is ready
+# instead of busy-spinning on WouldBlock.
+libc = "0.2"
 ssh2 = "0.9"
 tracing = "0.1"
-tokio = { version = "1", features = ["full", "tracing"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
