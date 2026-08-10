@@ -1,3 +1,7 @@
+"""
+Opens a newline delimited JSON file and loads it into a BigQuery
+table for better querying.
+"""
 import os
 
 from google.cloud import bigquery

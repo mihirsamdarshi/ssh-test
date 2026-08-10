@@ -38,7 +38,7 @@ impl<H: client::Handler> Scp for client::Handle<H> {
         permissions: usize,
     ) -> anyhow::Result<(), russh::Error> {
         // Request a channel, and wait until it completes.
-        let mut channel = self.channel_open_session().await?;
+        let channel = self.channel_open_session().await?;
         eprintln!("channel open: {:?}", channel.id());
         // Actually send the file.
         channel.exec(false, &*(format!("scp -t {dirname}"))).await?;
