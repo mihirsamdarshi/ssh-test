@@ -52,10 +52,12 @@ async fn handle_req(
     stream: TcpStream,
     unique_id: String,
 ) -> std::io::Result<()> {
-    // Connect to the literal loopback address rather than "localhost": on hosts
-    // where `localhost` resolves to ::1 first, sshd tries the IPv6 address and a
-    // server bound only to 127.0.0.1 intermittently yields "Channel open failure
-    // (connect failed)" depending on whether sshd falls back to IPv4.
+    // Connect to the literal loopback address rather than "localhost". sshd
+    // resolves this name itself, and `localhost` resolves to ::1 before
+    // 127.0.0.1 on many hosts, so a target bound only to IPv4 is reached only
+    // via sshd's fallback from the refused ::1 attempt. Naming the address we
+    // actually mean removes that dependency. (Hardening, not a fix for any
+    // observed failure -- sshd's fallback does work here.)
     let mut channel = session
         .channel_direct_tcpip("127.0.0.1", remote_port, None)
         .await
