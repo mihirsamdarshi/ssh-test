@@ -12,7 +12,7 @@ use std::{
 use anyhow::anyhow;
 use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
 use ssh2::Session;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 const BUFFER_SIZE: usize = 128;
@@ -135,6 +135,98 @@ fn listen_on_forwarded_port(
     }
 
     println!("TCP Listener stopped");
+
+    Ok(())
+}
+
+pub fn create_tunnel(
+    local_port: u16,
+    remote_server: String,
+    remote_port: u16,
+    session: Arc<Session>,
+) -> Result<(), String> {
+    match TcpListener::bind((LOCALHOST, local_port)) {
+        Err(err) => return Err(err.to_string()),
+        Ok(listener) => {
+            debug!("Succesfully bound localhost:{} on host machine", local_port);
+            match session.channel_direct_tcpip(remote_server.as_str(), remote_port, None) {
+                Err(err) => return Err(err.to_string()),
+                Ok(channel) => {
+                    debug!(
+                        "Succesfully bound localhost:{} on remote machine",
+                        remote_port
+                    );
+                    // increase if timing out a lot
+                    session.set_timeout(10000);
+                    // very important, otherwise reading from channel will block whil waiting for
+                    // data that may not arrive
+                    session.set_blocking(false);
+                    let mut stream_id = 0;
+
+                    tokio::task::spawn_blocking(move || {
+                        'listener_loop: loop {
+                            match listener.accept() {
+                                Err(err) => {
+                                    error!("failed to accept connection, reason {:?}", err);
+                                    break 'listener_loop;
+                                }
+                                Ok((stream, socket)) => {
+                                    debug!("New TCP stream from socket {:}", socket);
+
+                                    let mut reader_stream = stream;
+                                    let mut writer_stream = reader_stream.try_clone().unwrap();
+                                    // open two streams on the same channel, so we can read and
+                                    // write seperatly
+
+                                    let mut writer_channel = { channel.stream(stream_id) };
+                                    let mut reader_channel = { channel.stream(stream_id) };
+                                    // new TCP streams bound to new channel streams
+                                    stream_id += 1;
+
+                                    // pipe stream output into channel
+                                    tokio::task::spawn_blocking(move || loop {
+                                        match std::io::copy(&mut reader_stream, &mut writer_channel)
+                                        {
+                                            Ok(_) => (),
+                                            Err(err) => {
+                                                error!(
+                                                    "Failed to write to channel, reason: {:?}",
+                                                    err
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    });
+
+                                    // pipe channel output into stream
+                                    tokio::task::spawn_blocking(move || loop {
+                                        match std::io::copy(&mut reader_channel, &mut writer_stream)
+                                        {
+                                            Ok(_) => (),
+                                            Err(err) => {
+                                                error!(
+                                                    "Failed to read from channel, reason: {:?}",
+                                                    err
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        // not accepting any more connections
+                        warn!(
+                            "Tunnel on localhost:{:}  to {:}:{:} closed!",
+                            local_port,
+                            remote_server.as_str(),
+                            remote_port
+                        )
+                    });
+                }
+            }
+        }
+    };
 
     Ok(())
 }

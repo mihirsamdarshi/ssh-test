@@ -10,5 +10,6 @@ license = "MIT"
 anyhow = "1"
 common-port-forward = { path = "../common" }
 ctrlc = "3"
-ssh2 = "0.9.4"
+ssh2 = "0.9"
 tracing = "0.1"
+tokio = { version = "1", features = ["full", "tracing"] }
