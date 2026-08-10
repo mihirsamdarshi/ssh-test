@@ -100,9 +100,10 @@ async fn handle_conn(
     remote_port: u32,
 ) -> Result<()> {
     // Forward to the literal loopback address rather than "localhost": sshd
-    // resolves the name, and on hosts where localhost resolves to ::1 first a
-    // server bound only to 127.0.0.1 intermittently fails the channel open
-    // with "connect failed".
+    // resolves the name, and on hosts where localhost yields ::1 first an
+    // IPv4-only target is reached only via sshd's fallback from the refused
+    // ::1 attempt. Naming the address we mean removes that dependency
+    // (hardening; sshd's fallback does work in practice).
     let channel = sess
         .session
         .channel_open_direct_tcpip(

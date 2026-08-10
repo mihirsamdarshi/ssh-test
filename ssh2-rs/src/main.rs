@@ -524,10 +524,10 @@ fn main() -> anyhow::Result<()> {
         &exit_signal,
         args.local_port,
         // The literal address, not "localhost": sshd resolves the forward
-        // target itself and "localhost" yields ::1 first on hosts with an IPv6
-        // loopback, so opening the channel intermittently fails with
-        // "Channel open failure (connect failed)" against a server bound only
-        // to 127.0.0.1.
+        // target itself, and "localhost" yields ::1 first on hosts with an
+        // IPv6 loopback, leaving IPv4-only targets reachable only via sshd's
+        // fallback from the refused ::1 attempt. Naming the address we mean
+        // removes that dependency (hardening; sshd's fallback does work).
         "127.0.0.1",
         args.remote_port,
     )?;
