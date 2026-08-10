@@ -1,29 +1,32 @@
+//! Local port forwarding (`ssh -L`) built on `async-ssh2-lite` (libssh2).
+//!
+//! Each accepted TCP connection is spliced byte-for-byte onto a
+//! `direct-tcpip` SSH channel in *both* directions concurrently. There is no
+//! request parsing, no "a short read means the request ended" heuristic and no
+//! EOF-after-the-first-response hack, so HTTP keep-alive, pipelining, request
+//! bodies larger than one read and arbitrarily large responses all work.
+//!
+//! Caveat inherent to libssh2: every channel shares one session lock, so many
+//! concurrent transfers are serialized at the transport layer. That is a
+//! throughput limit, not a correctness one.
+
 use std::{
-    fmt::Debug,
-    io::{Error, ErrorKind},
+    io::Error,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::Path,
-    str,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::Duration,
+    sync::Arc,
 };
 
-use anyhow::Result;
 use async_ssh2_lite::AsyncSession;
-use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
+use common_port_forward::{expand_home_dir, get_args, setup_tracing};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{copy, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     select,
 };
-use tracing::{debug, debug_span, error, instrument, Instrument};
+use tracing::{debug, error, instrument, Instrument};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use uuid::Uuid;
-
-const BUFFER_SIZE: usize = 8192;
 
 #[derive(Debug)]
 struct SSHKeyPair<'a> {
@@ -35,89 +38,55 @@ fn make_socket_address<A: ToSocketAddrs>(address: A) -> SocketAddr {
     address.to_socket_addrs().unwrap().next().unwrap()
 }
 
-/// Read the stream data and return stream data & its length.
-#[instrument]
-async fn read_stream<R: AsyncRead + Unpin + Debug>(mut stream: R) -> (Vec<u8>, usize) {
-    let mut request_buffer = vec![];
-    // let us loop & try to read the whole request data
-    let mut request_len = 0usize;
-    loop {
-        let mut buffer = vec![0; BUFFER_SIZE];
-        // println!("Reading stream data");
-        match stream.read(&mut buffer).await {
-            Ok(n) => {
-                if !read_buf_bytes(&mut request_len, &mut request_buffer, n, buffer) {
-                    break;
-                }
-            }
-            Err(e) => {
-                println!("Error in reading request data: {e:?}");
-                break;
-            }
-        }
-    }
-
-    (request_buffer, request_len)
-}
-
-/// Read the stream data and return stream data & its length.
-#[instrument(skip(stream))]
-async fn read_async_channel<R: AsyncReadExt + Unpin>(stream: &mut R) -> (Vec<u8>, usize) {
-    let mut response_buffer = vec![];
-    // let us loop & try to read the whole request data
-    let mut response_len = 0usize;
-    loop {
-        let mut buffer = vec![0; BUFFER_SIZE];
-        // println!("Reading stream data");
-        let future_stream = stream.read(&mut buffer);
-        thread::sleep(Duration::from_millis(10));
-
-        match future_stream.await {
-            Ok(n) => {
-                if !read_buf_bytes(&mut response_len, &mut response_buffer, n, buffer) {
-                    break;
-                }
-            }
-            Err(e) => {
-                error!("Error in reading response data: {e:?}");
-                break;
-            }
-        }
-    }
-
-    (response_buffer, response_len)
-}
-
-#[instrument(skip(session))]
+/// Splice one accepted local connection onto a fresh `direct-tcpip` channel.
+///
+/// Both directions run concurrently on the same task (`try_join!`), which keeps
+/// all libssh2 calls for this connection on one thread while still allowing
+/// full-duplex traffic. When the local side reaches EOF we send channel EOF so
+/// the remote peer sees the half-close; when the remote side reaches EOF we
+/// shut down the write half of the local socket.
+#[instrument(skip(session, stream), err)]
 async fn handle_req(
     remote_port: u16,
     session: Arc<AsyncSession<TcpStream>>,
-    mut stream: TcpStream,
+    stream: TcpStream,
     unique_id: String,
-) {
+) -> std::io::Result<()> {
+    // Connect to the literal loopback address rather than "localhost": on hosts
+    // where `localhost` resolves to ::1 first, sshd tries the IPv6 address and a
+    // server bound only to 127.0.0.1 intermittently yields "Channel open failure
+    // (connect failed)" depending on whether sshd falls back to IPv4.
     let mut channel = session
-        .channel_direct_tcpip("localhost", remote_port, None)
+        .channel_direct_tcpip("127.0.0.1", remote_port, None)
         .await
-        .unwrap();
+        .map_err(|e| Error::other(format!("channel_direct_tcpip: {e}")))?;
 
-    let (request, req_bytes) = read_stream(&mut stream).await;
+    // `AsyncChannel::stream(0)` hands out an independent reader for the same
+    // channel, so the two copy futures below never need `&mut` at the same time.
+    let mut channel_reader = channel.stream(0);
+    let (mut local_reader, mut local_writer) = stream.into_split();
 
-    debug!(
-        "REQUEST ({} BYTES): {}",
-        req_bytes,
-        String::from_utf8_lossy(&request[..])
-    );
-    // send the incoming request over ssh on to the remote localhost and port
-    // where an HTTP server is listening
-    channel.write_all(&request[..req_bytes]).await.unwrap();
-    channel.flush().await.unwrap();
-    channel.eof();
+    let local_to_remote = async {
+        let n = copy(&mut local_reader, &mut channel).await?;
+        // Propagate the half-close upstream; ignore failures caused by the
+        // channel already being torn down by the peer.
+        if let Err(e) = channel.send_eof().await {
+            debug!("send_eof after {n} bytes: {e}");
+        }
+        Ok::<u64, Error>(n)
+    };
 
-    let (response, res_bytes) = read_async_channel(&mut channel).await;
+    let remote_to_local = async {
+        let n = copy(&mut channel_reader, &mut local_writer).await?;
+        let _ = local_writer.shutdown().await;
+        Ok::<u64, Error>(n)
+    };
 
-    stream.write_all(&response[..res_bytes]).await.unwrap();
-    stream.flush().await.unwrap();
-    debug!("SENT {} BYTES AS RESPONSE\n", res_bytes);
+    let (up, down) = tokio::try_join!(local_to_remote, remote_to_local)?;
+    debug!("forwarded {up} bytes up, {down} bytes down");
+
+    let _ = channel.close().await;
+    Ok(())
 }
 
 #[instrument]
@@ -128,7 +97,7 @@ async fn create_ssh_session(
 ) -> Result<AsyncSession<TcpStream>, Error> {
     let stream = TcpStream::connect(remote_address).await?;
     let mut session = AsyncSession::new(stream, None)?;
-    session.handshake().await.unwrap();
+    session.handshake().await?;
     session
         .userauth_pubkey_file(
             username,
@@ -142,7 +111,7 @@ async fn create_ssh_session(
         Ok(session)
     } else {
         Err(session.last_error().map_or_else(
-            || Error::new(ErrorKind::Other, "unknown user auth error"),
+            || Error::other("unknown user auth error"),
             Error::from,
         ))
     }
@@ -153,36 +122,52 @@ async fn local_port_forward(
     local_listener: TcpListener,
     remote_port: u16,
     ssh_session: AsyncSession<TcpStream>,
-    should_exit: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let ssh_session = Arc::from(ssh_session);
+
     loop {
-        if should_exit.load(Ordering::SeqCst) {
-            break;
-        }
+        let (stream, peer) = local_listener.accept().await?;
+        let _ = stream.set_nodelay(true);
 
-        match local_listener.accept().await {
-            Ok((stream, _a)) => {
-                let unique_id = Uuid::new_v4().to_string();
-                let span = debug_span!("handle_req", unique_id = unique_id);
-                let _enter = span.enter();
-                let cloned_session = Arc::clone(&ssh_session);
-                tokio::spawn(
-                    handle_req(remote_port, cloned_session, stream, unique_id).in_current_span(),
-                );
+        let unique_id = Uuid::new_v4().to_string();
+        let cloned_session = Arc::clone(&ssh_session);
+        let span = tracing::debug_span!("handle_req", unique_id = %unique_id, peer = %peer);
+
+        tokio::spawn(
+            async move {
+                if let Err(e) = handle_req(remote_port, cloned_session, stream, unique_id).await {
+                    error!("connection from {peer} failed: {e}");
+                }
             }
-            Err(e) => panic!("encountered error: {}", e),
-        }
+            .instrument(span),
+        );
     }
-
-    println!("TCP Listener stopped");
-
-    Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
+/// Install a subscriber.
+///
+/// `common_port_forward::setup_tracing` spawns a `console-subscriber` (which
+/// binds a fixed TCP port, so two of these binaries cannot run at once) and
+/// writes `trace.json` into the current directory. Its `debug` default also
+/// badly distorts throughput measurements. So it is opt-in via
+/// `PORT_FORWARD_TRACE`; otherwise a plain stderr subscriber is used
+/// (`RUST_LOG` still applies, defaulting to `info`).
+fn init_tracing() {
+    if std::env::var_os("PORT_FORWARD_TRACE").is_some() {
+        setup_tracing();
+        return;
+    }
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
-    setup_tracing();
+    init_tracing();
     let args = get_args();
 
     let remote_address = SocketAddr::new(IpAddr::V4(args.ip), 22);
@@ -200,52 +185,22 @@ async fn main() -> std::io::Result<()> {
         private_key: private_key.as_ref().map(AsRef::as_ref),
     };
 
-    let session = match create_ssh_session(&args.user, remote_address, key_pair).await {
-        Ok(sess) => sess,
-        Err(e) => return Err(e),
-    };
-
-    let should_exit = Arc::new(AtomicBool::new(false));
-    let listener_should_exit = Arc::clone(&should_exit);
+    let session = create_ssh_session(&args.user, remote_address, key_pair).await?;
 
     let local_address = make_socket_address(("127.0.0.1", args.local_port));
+    let local_listener = TcpListener::bind(local_address).await.map_err(|e| {
+        error!("error binding to local port {}: {e}", args.local_port);
+        e
+    })?;
 
-    let local_listener = match TcpListener::bind(local_address).await {
-        Ok(listener) => {
-            if let Ok(address) = listener.local_addr() {
-                debug!("{}", address);
-                listener
-            } else {
-                debug!("Could not get local address");
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            debug!("Error in binding to local port: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let t1 = tokio::spawn(local_port_forward(
-        local_listener,
-        args.remote_port,
-        session,
-        listener_should_exit,
-    ));
-
-    let t2 = tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        {
-            should_exit.store(true, Ordering::SeqCst);
-            let _ = TcpStream::connect(make_socket_address(local_address))
-                .await
-                .unwrap();
-        }
-    });
+    debug!("listening on {}", local_listener.local_addr()?);
 
     select! {
-        _ = t1 => {},
-        _ = t2 => {},
+        res = local_port_forward(local_listener, args.remote_port, session) => res?,
+        res = tokio::signal::ctrl_c() => {
+            res?;
+            debug!("ctrl-c received, shutting down");
+        }
     }
 
     Ok(())
