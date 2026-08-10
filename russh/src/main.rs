@@ -1,3 +1,16 @@
+//! Local port forwarding (`ssh -L`) implemented with russh 0.62.
+//!
+//! Each accepted TCP connection gets its own `direct-tcpip` channel, and the
+//! two are spliced together with [`tokio::io::copy_bidirectional`]. There is no
+//! request parsing, no "stop reading on a short read" heuristic and no
+//! EOF-after-the-first-response hack: bytes flow in both directions until one
+//! side shuts down, which is what makes keep-alive, pipelining and large
+//! transfers work.
+//!
+//! `client::Handle` methods take `&self` in russh 0.62, so the session is
+//! shared through an `Arc` without a `Mutex` — opening a channel never blocks
+//! data flowing on the other channels.
+
 use std::{
     fmt::Debug,
     net::{IpAddr, SocketAddr},
@@ -5,69 +18,45 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Result};
-use common_port_forward::{expand_home_dir, get_args, read_buf_bytes, setup_tracing};
-use russh::{client, client::Msg, Channel, ChannelMsg, Disconnect};
-use russh_keys::load_secret_key;
+use anyhow::{anyhow, Context, Result};
+use common_port_forward::{expand_home_dir, get_args, setup_tracing};
+use russh::{
+    client::{self, Handle},
+    keys::{load_secret_key, PrivateKeyWithHashAlg},
+    Disconnect,
+};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     select,
-    sync::Mutex,
 };
-use tracing::{debug, debug_span, error, instrument, Instrument};
-use uuid::Uuid;
+use tracing::{debug, error, info, instrument};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod scp;
 
-const BUFFER_SIZE: usize = 16_384;
+struct Client;
 
-struct Client {}
-
-#[async_trait::async_trait]
 impl client::Handler for Client {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        _server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
+        // Demo only: accept any host key. Production code must verify against
+        // known_hosts / instance metadata.
         Ok(true)
     }
 }
 
 pub struct Session {
-    session: client::Handle<Client>,
+    session: Handle<Client>,
 }
 
 impl Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Session")
     }
-}
-
-#[instrument]
-async fn read_stream<R: AsyncReadExt + Debug + Unpin>(mut stream: R) -> (Vec<u8>, usize) {
-    let mut request_buffer = vec![];
-    // let us loop & try to read the whole request data
-    let mut request_len = 0usize;
-    loop {
-        let mut buffer = vec![0; BUFFER_SIZE];
-        // read the stream into the buffer, while the response length is not 0
-        match stream.read(&mut buffer).await {
-            Ok(n) => {
-                if !read_buf_bytes(&mut request_len, &mut request_buffer, n, buffer) {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading stream: {e}");
-                break;
-            }
-        }
-    }
-
-    (request_buffer, request_len)
 }
 
 impl Session {
@@ -77,25 +66,24 @@ impl Session {
         addr: SocketAddr,
         private_key_path: P,
     ) -> Result<Self> {
-        let key_pair = load_secret_key(private_key_path, None)?;
+        let key_pair = load_secret_key(private_key_path, None).context("loading private key")?;
         let config = Arc::new(client::Config::default());
-        let sh = Client {};
-        let mut session = client::connect(config, addr, sh).await?;
-        let auth_res = session
-            .authenticate_publickey(user, Arc::new(key_pair))
+        let mut session = client::connect(config, addr, Client)
             .await
-            .unwrap();
+            .context("connecting to the SSH server")?;
 
-        if !auth_res {
-            eprintln!("Authentication failed");
-            std::process::exit(1);
-        }
+        let auth_res = session
+            .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key_pair), None))
+            .await
+            .context("authenticating")?;
+
+        anyhow::ensure!(auth_res.success(), "public key authentication failed");
 
         Ok(Self { session })
     }
 
     #[instrument]
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         self.session
             .disconnect(Disconnect::ByApplication, "", "en-US")
             .await?;
@@ -103,148 +91,109 @@ impl Session {
     }
 }
 
-#[instrument(skip(channel))]
-async fn handle_req(mut channel: Channel<Msg>, mut incoming_stream: TcpStream, unique_id: String) {
-    debug!("Splitting stream");
-    let (mut read_half, mut write_half) = incoming_stream.split();
-
-    debug!("Reading stream");
-    let (request_buffer, request_len) = read_stream(&mut read_half).in_current_span().await;
-    debug!("Request buffer: {:?}", std::str::from_utf8(&request_buffer));
-    debug!("request_len: {}", request_len);
-
-    if let Err(e) = channel
-        .data(&request_buffer[..request_len])
-        .in_current_span()
-        .await
-    {
-        error!("Error in forwarding request to server: {:?}", e);
-    };
-
-    // debug!("Sending EOF to server");
-    // if let Err(e) = channel.eof().in_current_span().await {
-    //     error!("Error in sending EOF to server: {:?}", e);
-    // }
-
-    let mut received_response = false;
-
-    debug!("Waiting for response");
-    let mut total_len = 0usize;
-
-    while let Some(msg) = channel.wait().in_current_span().await {
-        debug!("Received response from server = {:?}", &msg);
-        match msg {
-            ChannelMsg::Data { ref data } => {
-                debug!("Writing response to client");
-                let mut b = Vec::<u8>::new();
-                data.write_all_from(0, &mut b).unwrap();
-                match write_half.write_all(&b).in_current_span().await {
-                    Ok(_) => {
-                        total_len += b.len();
-                    }
-                    Err(e) => {
-                        error!("Error in writing response to client: {:?}", e);
-                    }
-                };
-
-                if !received_response {
-                    received_response = true;
-                    debug!("Sending EOF to server");
-                    if let Err(e) = channel.eof().in_current_span().await {
-                        error!("Error in sending EOF to server: {:?}", e);
-                    }
-                }
-
-                debug!("Response written to client");
-            }
-            ChannelMsg::Eof => {
-                debug!("Received EOF from server");
-                break;
-            }
-            ChannelMsg::Close => {
-                debug!("End of data to be received");
-                break;
-            }
-            _ => error!("Unknown message: {:?}", msg),
-        }
-    }
-    debug!("Total response len: {}", total_len);
-    debug!("Closing channel");
-}
-
-#[instrument]
-async fn listen_on_forwarded_port(
-    sess: Arc<Mutex<Session>>,
-    local_port: u32,
+/// Splice one accepted TCP connection onto its own `direct-tcpip` channel.
+#[instrument(skip(sess))]
+async fn handle_conn(
+    sess: Arc<Session>,
+    mut stream: TcpStream,
+    peer: SocketAddr,
     remote_port: u32,
 ) -> Result<()> {
-    debug!("listening on forwarded port");
-    let user_facing_socket = TcpListener::bind(format!("127.0.0.1:{local_port}"))
-        .in_current_span()
+    let channel = sess
+        .session
+        .channel_open_direct_tcpip(
+            "localhost",
+            remote_port,
+            &peer.ip().to_string(),
+            peer.port().into(),
+        )
         .await
-        .unwrap();
+        .context("opening direct-tcpip channel")?;
+
+    let mut channel_stream = channel.into_stream();
+
+    let (to_server, to_client) = tokio::io::copy_bidirectional(&mut stream, &mut channel_stream)
+        .await
+        .context("forwarding data")?;
+
+    debug!("connection closed: {to_server} bytes sent, {to_client} bytes received");
+    Ok(())
+}
+
+#[instrument(skip(sess))]
+async fn listen_on_forwarded_port(
+    sess: Arc<Session>,
+    local_port: u16,
+    remote_port: u32,
+) -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", local_port))
+        .await
+        .with_context(|| format!("binding 127.0.0.1:{local_port}"))?;
+    info!("listening on 127.0.0.1:{local_port} -> localhost:{remote_port}");
 
     loop {
-        let unique_id = Uuid::new_v4().to_string();
-        let span = debug_span!("handle_req", unique_id = unique_id);
-        let _enter = span.enter();
-        let (stream, a) = user_facing_socket.accept().await.unwrap();
-        debug!("Accepted connection from {:?}", a);
+        let (stream, peer) = listener.accept().await.context("accepting connection")?;
+        debug!("accepted connection from {peer}");
 
-        let channel = {
-            let session_guard = sess.lock().await;
-            session_guard
-                .session
-                .channel_open_direct_tcpip(
-                    "localhost",
-                    remote_port,
-                    &a.ip().to_string(),
-                    a.port().into(),
-                )
-                .in_current_span()
-                .await
-                .unwrap()
-        };
-        tokio::spawn(handle_req(channel, stream, unique_id).in_current_span());
+        let sess = Arc::clone(&sess);
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(sess, stream, peer, remote_port).await {
+                error!("connection {peer}: {e:#}");
+            }
+        });
     }
 }
 
-struct Wrapper(Arc<Mutex<Session>>);
+/// Install a subscriber.
+///
+/// `common_port_forward::setup_tracing` spawns a `console-subscriber` (which
+/// binds a fixed TCP port) and writes `trace.json` into the current directory,
+/// so it is opt-in via `PORT_FORWARD_TRACE`; otherwise a plain stderr
+/// subscriber is used (`RUST_LOG` still applies, defaulting to `info`).
+fn init_tracing() {
+    if std::env::var_os("PORT_FORWARD_TRACE").is_some() {
+        setup_tracing();
+        return;
+    }
 
-#[instrument]
-#[tokio::main(flavor = "current_thread")]
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
+#[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing();
+    init_tracing();
     let args = get_args();
 
-    let ssh = Session::connect(
-        &args.user,
-        SocketAddr::new(IpAddr::V4(args.ip), 22),
-        expand_home_dir(&args.private_key_path).map_err(|e| anyhow!(e))?,
-    )
-    .await?;
+    let ssh = Arc::new(
+        Session::connect(
+            &args.user,
+            SocketAddr::new(IpAddr::V4(args.ip), 22),
+            expand_home_dir(&args.private_key_path).map_err(|e| anyhow!(e))?,
+        )
+        .await?,
+    );
 
-    let e = Arc::new(Mutex::new(ssh));
-    let cloned_e = Arc::clone(&e);
-
-    let t1 = tokio::spawn(listen_on_forwarded_port(
-        cloned_e,
-        u32::from(args.local_port),
+    let listener = tokio::spawn(listen_on_forwarded_port(
+        Arc::clone(&ssh),
+        args.local_port,
         u32::from(args.remote_port),
     ));
-    let w = Wrapper(e);
 
-    let t2 = tokio::spawn(async move {
+    let shutdown = tokio::spawn(async move {
         tokio::signal::ctrl_c().await.unwrap();
-        {
-            let mut session_guard = w.0.lock().await;
-            session_guard.close().await.unwrap();
+        info!("shutting down");
+        if let Err(e) = ssh.close().await {
+            error!("error closing session: {e:#}");
         }
     });
 
     select! {
-        _ = t1 => {},
-        _ = t2 => {},
+        r = listener => r??,
+        _ = shutdown => {},
     }
 
     Ok(())

@@ -1,3 +1,9 @@
+//! SCP helpers built on top of a russh client session.
+//!
+//! Kept as a demonstration of the `exec`/`ChannelMsg` API; the port-forwarding
+//! binary itself does not use it.
+#![allow(dead_code)]
+
 use std::{
     fs::File,
     io::{Cursor, Write},
@@ -71,10 +77,10 @@ impl<H: client::Handler> Scp for client::Handle<H> {
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { ref data }) => {
-                    let mut s: Vec<u8> = vec![];
-                    data.write_all_from(0, &mut s).unwrap();
+                    // `ChannelMsg::Data` carries `Bytes` in russh 0.62 (it was a
+                    // `CryptoVec` with `write_all_from` before).
                     let mut file = File::create(target).unwrap();
-                    file.write_all(&s).unwrap();
+                    file.write_all(data).unwrap();
                 }
                 Some(ChannelMsg::Eof | ChannelMsg::Close) => {
                     break;
