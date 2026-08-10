@@ -24,8 +24,16 @@ const BUFFER_SIZE: usize = 16_384;
 
 struct Client {}
 
+#[async_trait::async_trait]
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 pub struct Session {
