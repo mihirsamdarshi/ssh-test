@@ -99,10 +99,14 @@ async fn handle_conn(
     peer: SocketAddr,
     remote_port: u32,
 ) -> Result<()> {
+    // Forward to the literal loopback address rather than "localhost": sshd
+    // resolves the name, and on hosts where localhost resolves to ::1 first a
+    // server bound only to 127.0.0.1 intermittently fails the channel open
+    // with "connect failed".
     let channel = sess
         .session
         .channel_open_direct_tcpip(
-            "localhost",
+            "127.0.0.1",
             remote_port,
             &peer.ip().to_string(),
             peer.port().into(),
