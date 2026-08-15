@@ -73,13 +73,13 @@ impl<H: client::Handler> Scp for client::Handle<H> {
         // Actually send the file.
         channel.exec(false, &*(format!("scp -f {source}"))).await?;
         // Run the event loop until the channel closes.
+        let mut file = File::create(target).unwrap();
 
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { ref data }) => {
                     // `ChannelMsg::Data` carries `Bytes` in russh 0.62 (it was a
                     // `CryptoVec` with `write_all_from` before).
-                    let mut file = File::create(target).unwrap();
                     file.write_all(data).unwrap();
                 }
                 Some(ChannelMsg::Eof | ChannelMsg::Close) => {

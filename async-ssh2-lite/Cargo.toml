@@ -6,15 +6,8 @@ license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-anyhow = "1.0"
-async-io = "2.3"
 async-ssh2-lite = { version = "0.4", features = ["tokio"] }
 common-port-forward = { path = "../common" }
-futures = "0.3"
-openssh-keys = "0.6"
-openssl = { version = "0.10", features = ["vendored"] }
-pem = "3"
-rust-crypto = "0.2"
 tokio = { version = "1.38", features = ["full", "tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
